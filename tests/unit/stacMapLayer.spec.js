@@ -108,11 +108,27 @@ function cogAsset(key, opts = {}) {
     type: 'image/tiff; application=geotiff; profile=cloud-optimized',
     title: opts.title,
     roles: opts.roles || ['data'],
-    bands: [],
+    bands: opts.bands || [],
     getKey: () => key,
     getAbsoluteUrl: () => `https://example.com/${key}.tif`,
     href: `https://example.com/${key}.tif`,
   }
+}
+
+// A label mask that names and colours its own classes, as the classification
+// extension lets an asset do. This is what the FTW benchmark chips publish.
+function classifiedCogAsset(key, opts = {}) {
+  return cogAsset(key, {
+    ...opts,
+    bands: [{
+      data_type: 'uint8',
+      'classification:classes': [
+        { value: 0, name: 'background', color_hint: '000000' },
+        { value: 1, name: 'field', color_hint: '009E73' },
+        { value: 2, name: 'boundary', color_hint: 'D55E00' },
+      ],
+    }],
+  })
 }
 
 function fakeStac(assets, renders) {
@@ -428,6 +444,114 @@ describe('StacMapLayer', () => {
       dlayer.setStac(fakeStac(assets, renders))
       await dlayer.setAssets([assets[0]])
       expect(dlayer._cogList[0].render.colormap_name).toBe('viridis')
+    })
+
+    it('colours a categorical asset from its own class hints when no render exists', async () => {
+      const assets = [classifiedCogAsset('mask', { title: '3-class semantic mask' })]
+      dlayer.setStac(fakeStac(assets))
+      await dlayer.setAssets([assets[0]])
+      const descriptor = dlayer._cogList[0]
+      expect(descriptor.render.colormap).toEqual({ 1: [0, 158, 115, 255], 2: [213, 94, 0, 255] })
+      expect(descriptor.title).toBe('3-class semantic mask')
+    })
+
+    it('prefers the class hints over the colormap of a render that targets the asset', async () => {
+      const assets = [classifiedCogAsset('mask')]
+      const renders = {
+        labels: {
+          title: '3-class labels',
+          assets: ['mask'],
+          colormap: { 1: [255, 0, 0, 255], 2: [0, 0, 255, 255] },
+          nodata: [9],
+        },
+      }
+      dlayer.setStac(fakeStac(assets, renders))
+      await dlayer.setAssets([assets[0]])
+      const descriptor = dlayer._cogList[0]
+      // Hints win for the colours; the render still supplies title and nodata.
+      expect(descriptor.render.colormap).toEqual({ 1: [0, 158, 115, 255], 2: [213, 94, 0, 255] })
+      expect(descriptor.render.nodata).toEqual([0, 9])
+      expect(descriptor.title).toBe('3-class labels')
+    })
+
+    it('takes a scalar nodata from the targeting render', async () => {
+      const assets = [classifiedCogAsset('mask')]
+      const renders = { labels: { assets: ['mask'], nodata: 9 } }
+      dlayer.setStac(fakeStac(assets, renders))
+      await dlayer.setAssets([assets[0]])
+      expect(dlayer._cogList[0].render.nodata).toEqual([0, 9])
+    })
+
+    it('keeps the class hints over a render that targets another asset', async () => {
+      const assets = [classifiedCogAsset('mask')]
+      const renders = { other: { title: 'Elevation', assets: ['dem'], colormap_name: 'viridis' } }
+      dlayer.setStac(fakeStac(assets, renders))
+      await dlayer.setAssets([assets[0]])
+      const descriptor = dlayer._cogList[0]
+      expect(descriptor.render.colormap).toEqual({ 1: [0, 158, 115, 255], 2: [213, 94, 0, 255] })
+      expect(descriptor.render.colormap_name).toBeUndefined()
+    })
+
+    it('hands an asset with one unreadable hint back to its render', async () => {
+      // Colouring the readable classes alone left the mask mostly transparent
+      // and threw away the colormap that could have drawn it.
+      const assets = [cogAsset('mask', {
+        bands: [{ 'classification:classes': [
+          { value: 1, name: 'field', color_hint: '#009E73' },
+          { value: 2, name: 'boundary', color_hint: 'D55E00' },
+        ] }],
+      })]
+      const renders = { labels: { assets: ['mask'], colormap: { 1: [255, 0, 0, 255] } } }
+      dlayer.setStac(fakeStac(assets, renders))
+      await dlayer.setAssets([assets[0]])
+      expect(dlayer._cogList[0].render.colormap).toEqual({ 1: [255, 0, 0, 255] })
+    })
+
+    it('falls back to a targeting render for an asset with no class hints', async () => {
+      const assets = [cogAsset('mask')]
+      const renders = {
+        labels: { title: '3-class labels', assets: ['mask'], colormap: { 1: [255, 0, 0, 255] } },
+      }
+      dlayer.setStac(fakeStac(assets, renders))
+      await dlayer.setAssets([assets[0]])
+      expect(dlayer._cogList[0].render.colormap).toEqual({ 1: [255, 0, 0, 255] })
+      expect(dlayer._cogList[0].title).toBe('3-class labels')
+    })
+
+    it('names the legend rows from the classes when a render supplies the colours', async () => {
+      // The class names sit on the asset whether or not they carry hints, so the
+      // picker should read them on every precedence branch.
+      const assets = [cogAsset('mask', {
+        bands: [{ 'classification:classes': [
+          { value: 1, name: 'field' },
+          { value: 2, name: 'boundary' },
+        ] }],
+      })]
+      const renders = {
+        labels: { assets: ['mask'], colormap: { 1: [255, 0, 0, 255], 2: [0, 0, 255, 255] } },
+      }
+      dlayer.setStac(fakeStac(assets, renders))
+      await dlayer.setAssets([assets[0]])
+      const overlay = dlayer.getAssetOverlays().find(o => o.id === 'mask')
+      expect(overlay.legend.map(r => r.label)).toEqual(['field', 'boundary'])
+    })
+
+    it('lists the class names as a legend in the layer picker', async () => {
+      const assets = [classifiedCogAsset('mask')]
+      dlayer.setStac(fakeStac(assets))
+      await dlayer.setAssets([assets[0]])
+      const overlay = dlayer.getAssetOverlays().find(o => o.id === 'mask')
+      expect(overlay.legend).toEqual([
+        { color: 'rgb(0, 158, 115)', label: 'field' },
+        { color: 'rgb(213, 94, 0)', label: 'boundary' },
+      ])
+    })
+
+    it('gives a continuous-ramp COG no legend rows', async () => {
+      const assets = [cogAsset('dem')]
+      dlayer.setStac(fakeStac(assets, { h: { colormap_name: 'viridis', assets: ['dem'] } }))
+      await dlayer.setAssets([assets[0]])
+      expect(dlayer.getAssetOverlays().find(o => o.id === 'dem').legend).toEqual([])
     })
 
     it('a stale COG sync cannot repoint the overlay after a newer setAssets', async () => {
