@@ -1,6 +1,8 @@
 import Utils from '../utils';
 import { mapGetters, mapState } from 'vuex';
 import { stacBrowserSpecialHandling } from "../rels";
+import { orderedRenderLayers } from '../utils/renderOrder.js';
+import { resolveRenders } from '../utils/renders.js';
 
 const COG_MIME_TYPES = [
   'image/tiff',
@@ -127,10 +129,16 @@ export default {
       });
       if (cogAssets.length === 0) {return;}
 
+      // A declared `portolan:render_order` answers the question this method
+      // guesses at, for several layers at once. Guess only where nothing was
+      // declared.
+      const declared = orderedRenderLayers(this.data, resolveRenders(this.data), cogAssets);
       const visual = cogAssets.find(a =>
         Array.isArray(a.roles) && a.roles.includes('visual')
       );
-      this.selectedAssets = [visual || cogAssets[0]];
+      this.selectedAssets = declared.length
+        ? declared.map(l => l.asset)
+        : [visual || cogAssets[0]];
       this.hasAutoSelected = true;
     }
   }
